@@ -1,4 +1,4 @@
-package main
+package nie
 
 import (
 	"gorm.io/gorm"
