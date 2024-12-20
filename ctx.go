@@ -12,6 +12,7 @@ const (
 	CtxNickNameKey     = "nickName"
 	CtxEnterpriseIdKey = "enterpriseId"
 	CtxUnameKey        = "uname"
+	CtxRoleKey         = "role"
 )
 
 // CtxGlobalInt 从上下文中获取元数据
@@ -31,34 +32,45 @@ func CtxGlobalString(ctx context.Context, name string) (string, error) {
 	return "", errors.BadRequest("FAIL_VALIDATE", "认证错误")
 }
 
-// CtxInt 从上下文中获取元数据
-func CtxInt(ctx context.Context, name string) int64 {
+// ctxInt 从上下文中获取元数据
+func ctxInt(ctx context.Context, name string) int64 {
 	value := ctx.Value(name).(int64)
 	return value
 }
 
-// CtxString 从上下文中获取元数据
-func CtxString(ctx context.Context, name string) string {
+// ctxString 从上下文中获取元数据
+func ctxString(ctx context.Context, name string) string {
 	value := ctx.Value(name).(string)
+	return value
+}
+
+// ctxArr 从上下文中获取元数据
+func ctxArr(ctx context.Context, name string) []string {
+	value := ctx.Value(name).([]string)
 	return value
 }
 
 // CtxUid 从上下文中获取用户ID
 func CtxUid(ctx context.Context) int64 {
-	return CtxInt(ctx, CtxUidKey)
+	return ctxInt(ctx, CtxUidKey)
 }
 
 // CtxNickName 从上下文中获取用户昵称
 func CtxNickName(ctx context.Context) string {
-	return CtxString(ctx, CtxNickNameKey)
+	return ctxString(ctx, CtxNickNameKey)
 }
 
 // CtxEnterpriseId 从上下文中获取企业ID
 func CtxEnterpriseId(ctx context.Context) int64 {
-	return CtxInt(ctx, CtxEnterpriseIdKey)
+	return ctxInt(ctx, CtxEnterpriseIdKey)
 }
 
 // CtxUname 从上下文中获取用户名
 func CtxUname(ctx context.Context) string {
-	return CtxString(ctx, CtxUnameKey)
+	return ctxString(ctx, CtxUnameKey)
+}
+
+// CtxRoleKeys 从上下文中获取角色
+func CtxRoleKeys(ctx context.Context) []string {
+	return ctxArr(ctx, CtxRoleKey)
 }
