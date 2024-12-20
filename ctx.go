@@ -5,6 +5,7 @@ import (
 	"github.com/go-kratos/kratos/v2/errors"
 	"github.com/go-kratos/kratos/v2/metadata"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -46,8 +47,9 @@ func ctxString(ctx context.Context, name string) string {
 
 // ctxArr 从上下文中获取元数据
 func ctxArr(ctx context.Context, name string) []string {
-	value := ctx.Value(name).([]string)
-	return value
+	value := ctx.Value(name).(string)
+	arr := strings.Split(value, ",")
+	return arr
 }
 
 // CtxUid 从上下文中获取用户ID
