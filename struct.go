@@ -129,6 +129,22 @@ func GetAllowFields(obj interface{}, options ...FieldOptions) []string {
 			}
 			fieldNames = filteredFields
 		}
+
+		// 处理 'AddEnterpriseId' 选项
+		if option.AddEnterpriseId {
+			fieldNames = append(fieldNames, "EnterpriseId")
+		}
+
+		// 处理 'FiltersEnterpriseId' 选项
+		if option.FiltersEnterpriseId {
+			var filteredFields []string
+			for _, field := range fieldNames {
+				if field != "EnterpriseId" {
+					filteredFields = append(filteredFields, field)
+				}
+			}
+			fieldNames = filteredFields
+		}
 	}
 	return fieldNames
 }
