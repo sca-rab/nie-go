@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/jinzhu/copier"
 	"github.com/mitchellh/mapstructure"
 	"google.golang.org/protobuf/types/known/structpb"
@@ -296,17 +295,12 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 			// 使用 mapstructure 进行解码
 			err := mapstructure.Decode(fromField.Interface().(*structpb.Struct).AsMap(), targetInstance)
 			if err != nil {
-				fmt.Println("========================")
-				fmt.Println("fromField:", fromField)
 				return err
 			}
 
 			// 设置目标字段
 			toField.Set(reflect.ValueOf(targetInstance))
-		}
-
-		// 处理 []*structpb.Struct -> []*TargetStruct
-		if fromField.Type() == reflect.TypeOf([]*structpb.Struct{}) && fromField.Len() > 0 {
+		} else if fromField.Type() == reflect.TypeOf([]*structpb.Struct{}) && fromField.Len() > 0 { // 处理 []*structpb.Struct -> []*TargetStruct
 			// 获取目标切片的元素类型
 			elemType := toField.Type().Elem().Elem()
 
@@ -335,6 +329,23 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 
 			// 设置目标字段
 			toField.Set(newSlice)
+		} else if toField.Type() == reflect.TypeOf([]*structpb.Struct{}) && fromField.Kind() == reflect.Slice { // 处理 任意[] -> []*structpb.Struct
+			// 用json.Marshal将切片转换为json字符串
+			jsonBytes, err := json.Marshal(fromField.Interface())
+			if err != nil {
+				return err
+			}
+
+			// 使用json.Unmarshal将json字符串转换为[]*structpb.Struct
+			var protoStructs []*structpb.Struct
+			err = json.Unmarshal(jsonBytes, &protoStructs)
+			if err != nil {
+				return err
+			}
+
+			// 设置目标字段
+			toField.Set(reflect.ValueOf(protoStructs))
+
 		}
 	}
 
