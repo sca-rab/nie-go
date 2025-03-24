@@ -90,7 +90,13 @@ func GetNullTimeConverters() []copier.TypeConverter {
 				if !nullTime.Valid {
 					return "", nil
 				}
-				return nullTime.Time.Format("2006-01-02"), nil
+				// 尝试按 YYYY-MM-DD HH:MM:SS 格式输出
+				formatted := nullTime.Time.Format("2006-01-02 15:04:05")
+				if formatted[11:] == "00:00:00" {
+					// 如果时分秒为 00:00:00，按 YYYY-MM-DD 格式输出
+					formatted = nullTime.Time.Format("2006-01-02")
+				}
+				return formatted, nil
 			},
 		},
 		// string -> sql.NullTime
@@ -102,9 +108,16 @@ func GetNullTimeConverters() []copier.TypeConverter {
 				if dateStr == "" {
 					return sql.NullTime{Valid: false}, nil
 				}
-				parsedTime, err := time.Parse("2006-01-02", dateStr)
+				var parsedTime time.Time
+				var err error
+				// 先尝试按 YYYY-MM-DD HH:MM:SS 格式解析
+				parsedTime, err = time.Parse("2006-01-02 15:04:05", dateStr)
 				if err != nil {
-					return nil, err
+					// 若失败，尝试按 YYYY-MM-DD 格式解析
+					parsedTime, err = time.Parse("2006-01-02", dateStr)
+					if err != nil {
+						return nil, err
+					}
 				}
 				return sql.NullTime{Time: parsedTime, Valid: true}, nil
 			},
