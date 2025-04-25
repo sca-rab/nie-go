@@ -70,6 +70,7 @@ type FieldOptions struct {
 	Filters             interface{} // 可过滤的字段，string 或 []string
 	AddEnterpriseId     bool        // 是否添加EnterpriseId字段
 	FiltersEnterpriseId bool        // 是否过滤EnterpriseId字段
+	OnlyFields          interface{} // 仅保留的字段（忽略obj），string 或 []string
 }
 
 // GetAllowFields 提取结构体字段名的函数，返回字段名切片
@@ -79,6 +80,19 @@ type FieldOptions struct {
 // model.SelectUpdateFields 方法中已添加 UpdateId, UpdateBy
 func GetAllowFields(obj interface{}, options ...FieldOptions) []string {
 	var fieldNames []string
+	// 如果传入OnlyFields选项，则直接返回该选项的值
+	if len(options) > 0 {
+		option := options[0]
+		if option.OnlyFields != nil {
+			switch v := option.OnlyFields.(type) {
+			case string:
+				fieldNames = append(fieldNames, v)
+			case []string:
+				fieldNames = append(fieldNames, v...)
+			}
+			return fieldNames
+		}
+	}
 	typ := reflect.TypeOf(obj)
 	// 需要检查是否是指针类型，若是，则获取其所指向的类型
 	if typ.Kind() == reflect.Ptr {
