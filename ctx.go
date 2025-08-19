@@ -2,10 +2,11 @@ package nie
 
 import (
 	"context"
-	"github.com/go-kratos/kratos/v2/errors"
-	"github.com/go-kratos/kratos/v2/metadata"
 	"strconv"
 	"strings"
+
+	"github.com/go-kratos/kratos/v2/errors"
+	"github.com/go-kratos/kratos/v2/metadata"
 )
 
 const (
@@ -14,6 +15,7 @@ const (
 	CtxEnterpriseIdKey = "enterpriseId"
 	CtxUnameKey        = "uname"
 	CtxRoleKey         = "role"
+	CtxOfficeIdKey     = "officeId"
 )
 
 // CtxGlobalInt 从上下文中获取元数据
@@ -75,4 +77,9 @@ func CtxUname(ctx context.Context) string {
 // CtxRoleKeys 从上下文中获取角色
 func CtxRoleKeys(ctx context.Context) []string {
 	return ctxArr(ctx, CtxRoleKey)
+}
+
+// CtxOfficeId 从上下文中获取单位ID
+func CtxOfficeId(ctx context.Context) int64 {
+	return ctxInt(ctx, CtxOfficeIdKey)
 }
