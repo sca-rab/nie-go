@@ -2,8 +2,12 @@ package nie
 
 import (
 	"context"
-	"github.com/redis/go-redis/v9"
+	"encoding/json"
+	"errors"
+	"reflect"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 )
 
 var DefaultCache *Cache
@@ -31,15 +35,51 @@ func InitCache(client redis.Cmdable) {
 
 // SetRedis 设置缓存
 func (c *Cache) SetRedis(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
-	return c.redis.Set(ctx, key, value, expiration).Err()
+	// 处理字符串类型（直接存储）
+	if str, ok := value.(string); ok {
+		return c.redis.Set(ctx, key, str, expiration).Err()
+	}
+	// 处理基本类型（int, float等）
+	if isBasicType(value) {
+		return c.redis.Set(ctx, key, value, expiration).Err()
+	}
+	// 其他类型视为结构体/复杂类型，进行JSON序列化
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return c.redis.Set(ctx, key, data, expiration).Err()
 }
 
 // GetRedis 获取缓存
-func (c *Cache) GetRedis(ctx context.Context, key string) (string, error) {
-	return c.redis.Get(ctx, key).Result()
+func (c *Cache) GetRedis(ctx context.Context, key string, result ...interface{}) (string, error) {
+	// 普通获取模式：不传入result则返回原始字符串
+	if len(result) == 0 {
+		return c.redis.Get(ctx, key).Result()
+	}
+	// 结构体获取模式：传入result指针则进行反序列化
+	data, err := c.redis.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return "", err
+		}
+		return "", err
+	}
+	// 反序列化到目标结构体
+	if err := json.Unmarshal(data, result[0]); err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // DelRedis 删除缓存
 func (c *Cache) DelRedis(ctx context.Context, key string) error {
 	return c.redis.Del(ctx, key).Err()
+}
+
+// 判断是否为基本数据类型（避免对基本类型进行JSON序列化）
+func isBasicType(v interface{}) bool {
+	kind := reflect.TypeOf(v).Kind()
+	return kind >= reflect.Bool && kind <= reflect.Complex128 ||
+		kind == reflect.String
 }
