@@ -4,12 +4,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"time"
+
 	"github.com/jinzhu/copier"
 	"github.com/mitchellh/mapstructure"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gorm.io/datatypes"
-	"reflect"
-	"time"
 )
 
 // Copier4Bff 使用 copier 深拷贝
@@ -359,6 +360,36 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 			// 设置目标字段
 			toField.Set(reflect.ValueOf(protoStructs))
 
+		} else if toField.Type() == reflect.TypeOf(&structpb.Struct{}) {
+			// 新增：*TargetStruct -> *structpb.Struct
+			// 支持 from 为指针结构体；nil 时置为 nil
+			var src interface{}
+			switch fromField.Kind() {
+			case reflect.Ptr:
+				if fromField.IsNil() {
+					toField.Set(reflect.Zero(toField.Type()))
+					continue
+				}
+				if fromField.Elem().Kind() != reflect.Struct {
+					continue
+				}
+				src = fromField.Interface()
+			case reflect.Struct:
+				// 可选：也支持值类型结构体 -> *structpb.Struct
+				src = fromField.Interface()
+			default:
+				continue
+			}
+
+			jsonBytes, err := json.Marshal(src)
+			if err != nil {
+				return err
+			}
+			ps := &structpb.Struct{}
+			if err := ps.UnmarshalJSON(jsonBytes); err != nil {
+				return err
+			}
+			toField.Set(reflect.ValueOf(ps))
 		}
 	}
 
