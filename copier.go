@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/jinzhu/copier"
@@ -85,42 +86,39 @@ func GetNullTimeConverters() []copier.TypeConverter {
 		// sql.NullTime -> string
 		{
 			SrcType: sql.NullTime{},
-			DstType: "",
+			DstType: copier.String,
 			Fn: func(src interface{}) (interface{}, error) {
-				nullTime := src.(sql.NullTime)
-				if !nullTime.Valid {
+				nt := src.(sql.NullTime)
+				if !nt.Valid {
 					return "", nil
 				}
-				// 尝试按 YYYY-MM-DD HH:MM:SS 格式输出
-				formatted := nullTime.Time.Format("2006-01-02 15:04:05")
-				if formatted[11:] == "00:00:00" {
-					// 如果时分秒为 00:00:00，按 YYYY-MM-DD 格式输出
-					formatted = nullTime.Time.Format("2006-01-02")
+				/// 整天输出 YYYY-MM-DD，否则输出 YYYY-MM-DD HH:MM:SS
+				if nt.Time.Hour() == 0 && nt.Time.Minute() == 0 && nt.Time.Second() == 0 {
+					return nt.Time.Format("2006-01-02"), nil
 				}
-				return formatted, nil
+				return nt.Time.Format("2006-01-02 15:04:05"), nil
 			},
 		},
 		// string -> sql.NullTime
 		{
-			SrcType: "",
+			SrcType: copier.String,
 			DstType: sql.NullTime{},
 			Fn: func(src interface{}) (interface{}, error) {
-				dateStr := src.(string)
-				if dateStr == "" {
+				s := strings.TrimSpace(src.(string))
+				if s == "" {
 					return sql.NullTime{Valid: false}, nil
 				}
-				var parsedTime time.Time
-				var err error
-				// 先尝试按 YYYY-MM-DD HH:MM:SS 格式解析
-				parsedTime, err = time.Parse("2006-01-02 15:04:05", dateStr)
-				if err != nil {
-					// 若失败，尝试按 YYYY-MM-DD 格式解析
-					parsedTime, err = time.Parse("2006-01-02", dateStr)
-					if err != nil {
-						return nil, err
+				layouts := []string{
+					time.DateTime,
+					time.DateOnly,
+					"2006-01", // 兼容仅到月份的场景，如 "2025-10"
+				}
+				for _, layout := range layouts {
+					if t, err := time.Parse(layout, s); err == nil {
+						return sql.NullTime{Time: t, Valid: true}, nil
 					}
 				}
-				return sql.NullTime{Time: parsedTime, Valid: true}, nil
+				return sql.NullTime{Valid: false}, nil
 			},
 		},
 	}
