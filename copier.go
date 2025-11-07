@@ -82,6 +82,14 @@ func getAllConverters() []copier.TypeConverter {
 // GetNullTimeConverters 获取 sql.NullTime ←→ string 转换器
 func GetNullTimeConverters() []copier.TypeConverter {
 	return []copier.TypeConverter{
+		// 新增：string→string 直接返回，优先级最高
+		{
+			SrcType: copier.String,
+			DstType: copier.String,
+			Fn: func(src interface{}) (interface{}, error) {
+				return src.(string), nil // 直接返回源字符串，不处理
+			},
+		},
 		// sql.NullTime -> string
 		{
 			SrcType: sql.NullTime{},
