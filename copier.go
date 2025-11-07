@@ -115,6 +115,12 @@ func GetNullTimeConverters() []copier.TypeConverter {
 				}
 				for _, layout := range layouts {
 					if t, err := time.Parse(layout, s); err == nil {
+						// 若为按月字符串，则归一为该月最后一天 00:00:00
+						if layout == "2006-01" {
+							loc := t.Location()
+							lastDay := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, loc)
+							return sql.NullTime{Time: lastDay, Valid: true}, nil
+						}
 						return sql.NullTime{Time: t, Valid: true}, nil
 					}
 				}
