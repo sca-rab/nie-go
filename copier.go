@@ -274,112 +274,88 @@ func GetTimeConverters() []copier.TypeConverter {
 	}
 }
 
-// convertStructPBFields 使用反射处理特殊字段
-func convertStructPBFields(to interface{}, from interface{}) error {
-	fromVal := reflect.ValueOf(from)
-	toVal := reflect.ValueOf(to)
+var (
+	typeStructPB      = reflect.TypeOf(&structpb.Struct{})
+	typeSliceStructPB = reflect.TypeOf([]*structpb.Struct{})
+)
 
+// convertStructPBFields 递归处理任意层级中的 *structpb.Struct / []*structpb.Struct
+func convertStructPBFields(to interface{}, from interface{}) error {
+	return walkAndConvert(reflect.ValueOf(to), reflect.ValueOf(from))
+}
+func walkAndConvert(toVal reflect.Value, fromVal reflect.Value) error {
 	if fromVal.Kind() != reflect.Ptr || toVal.Kind() != reflect.Ptr {
-		return errors.New("from and to must be pointers")
+		return nil
+	}
+	if fromVal.IsNil() || toVal.IsNil() {
+		return nil
 	}
 
 	fromVal = fromVal.Elem()
 	toVal = toVal.Elem()
-
 	if fromVal.Kind() != reflect.Struct || toVal.Kind() != reflect.Struct {
-		return errors.New("from and to must point to structs")
+		return nil
 	}
 
 	fromType := fromVal.Type()
-
 	for i := 0; i < fromVal.NumField(); i++ {
 		fromField := fromVal.Field(i)
-		fromFieldType := fromType.Field(i)
-		toField := toVal.FieldByName(fromFieldType.Name)
-
+		fieldInfo := fromType.Field(i)
+		toField := toVal.FieldByName(fieldInfo.Name)
 		if !toField.IsValid() || !toField.CanSet() {
 			continue
 		}
 
-		// 如果 from 和 to 都是*structpb.Struct 类型，跳过
-		if fromField.Type() == reflect.TypeOf(&structpb.Struct{}) && toField.Type() == reflect.TypeOf(&structpb.Struct{}) {
-			continue
-		}
-		// 如果 from 和 to 都是[]*structpb.Struct 类型，跳过
-		if fromField.Type() == reflect.TypeOf([]*structpb.Struct{}) && toField.Type() == reflect.TypeOf([]*structpb.Struct{}) {
-			continue
-		}
-
-		// 处理 *structpb.Struct -> *TargetStruct
-		if fromField.Type() == reflect.TypeOf(&structpb.Struct{}) && !fromField.IsNil() {
-			// 获取目标字段的类型
+		// 1. 直接转换 *structpb.Struct -> *TargetStruct
+		if fromField.Type() == typeStructPB && !fromField.IsNil() &&
+			toField.Kind() == reflect.Ptr && toField.Type() != typeStructPB {
 			targetType := toField.Type().Elem()
-
-			// 创建目标类型的实例
-			targetInstance := reflect.New(targetType).Interface()
-
-			// 使用 mapstructure 进行解码
-			err := mapstructure.Decode(fromField.Interface().(*structpb.Struct).AsMap(), targetInstance)
-			if err != nil {
+			inst := reflect.New(targetType).Interface()
+			if err := mapstructure.Decode(fromField.Interface().(*structpb.Struct).AsMap(), inst); err != nil {
 				return err
 			}
+			toField.Set(reflect.ValueOf(inst))
+			continue
+		}
 
-			// 设置目标字段
-			toField.Set(reflect.ValueOf(targetInstance))
-		} else if fromField.Type() == reflect.TypeOf([]*structpb.Struct{}) && fromField.Len() > 0 { // 处理 []*structpb.Struct -> []*TargetStruct
-			// 获取目标切片的元素类型
-			elemType := toField.Type().Elem().Elem()
+		// 2. 直接转换 []*structpb.Struct -> []*TargetStruct
+		if fromField.Type() == typeSliceStructPB && fromField.Len() > 0 &&
+			toField.Kind() == reflect.Slice && toField.Type() != typeSliceStructPB {
+			// 目标元素类型（支持 []*T / []T）
+			var elemType reflect.Type
+			if toField.Type().Elem().Kind() == reflect.Ptr {
+				elemType = toField.Type().Elem().Elem()
+			} else {
+				elemType = toField.Type().Elem()
+			}
 
-			// 创建一个新的切片
 			newSlice := reflect.MakeSlice(toField.Type(), 0, fromField.Len())
-
 			for j := 0; j < fromField.Len(); j++ {
-				protoStruct, ok := fromField.Index(j).Interface().(*structpb.Struct)
-				if !ok || protoStruct == nil {
+				ps, ok := fromField.Index(j).Interface().(*structpb.Struct)
+				if !ok || ps == nil {
 					continue
 				}
-				mapData := protoStruct.AsMap()
-
-				// 创建目标元素的实例
-				elemInstance := reflect.New(elemType).Interface()
-
-				// 使用 mapstructure 进行解码
-				err := mapstructure.Decode(mapData, elemInstance)
-				if err != nil {
+				inst := reflect.New(elemType).Interface()
+				if err := mapstructure.Decode(ps.AsMap(), inst); err != nil {
 					return err
 				}
-
-				// 将元素追加到切片
-				newSlice = reflect.Append(newSlice, reflect.ValueOf(elemInstance))
+				// 统一追加指针或值
+				if toField.Type().Elem().Kind() == reflect.Ptr {
+					newSlice = reflect.Append(newSlice, reflect.ValueOf(inst))
+				} else {
+					newSlice = reflect.Append(newSlice, reflect.ValueOf(inst).Elem())
+				}
 			}
-
-			// 设置目标字段
 			toField.Set(newSlice)
-		} else if toField.Type() == reflect.TypeOf([]*structpb.Struct{}) && fromField.Kind() == reflect.Slice { // 处理 任意[] -> []*structpb.Struct
-			// 用json.Marshal将切片转换为json字符串
-			jsonBytes, err := json.Marshal(fromField.Interface())
-			if err != nil {
-				return err
-			}
+			continue
+		}
 
-			// 使用json.Unmarshal将json字符串转换为[]*structpb.Struct
-			var protoStructs []*structpb.Struct
-			err = json.Unmarshal(jsonBytes, &protoStructs)
-			if err != nil {
-				return err
-			}
-
-			// 设置目标字段
-			toField.Set(reflect.ValueOf(protoStructs))
-
-		} else if toField.Type() == reflect.TypeOf(&structpb.Struct{}) {
-			// 新增：*TargetStruct -> *structpb.Struct
-			// 支持 from 为指针结构体；nil 时置为 nil
+		// 3. *TargetStruct / TargetStruct -> *structpb.Struct
+		if toField.Type() == typeStructPB {
 			var src interface{}
 			switch fromField.Kind() {
 			case reflect.Ptr:
 				if fromField.IsNil() {
-					toField.Set(reflect.Zero(toField.Type()))
 					continue
 				}
 				if fromField.Elem().Kind() != reflect.Struct {
@@ -387,23 +363,67 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 				}
 				src = fromField.Interface()
 			case reflect.Struct:
-				// 可选：也支持值类型结构体 -> *structpb.Struct
 				src = fromField.Interface()
 			default:
 				continue
 			}
-
-			jsonBytes, err := json.Marshal(src)
+			data, err := json.Marshal(src)
 			if err != nil {
 				return err
 			}
 			ps := &structpb.Struct{}
-			if err := ps.UnmarshalJSON(jsonBytes); err != nil {
+			if err := ps.UnmarshalJSON(data); err != nil {
 				return err
 			}
 			toField.Set(reflect.ValueOf(ps))
+			continue
+		}
+
+		// 4. 任意 []X -> []*structpb.Struct
+		if toField.Type() == typeSliceStructPB && fromField.Kind() == reflect.Slice {
+			b, err := json.Marshal(fromField.Interface())
+			if err != nil {
+				return err
+			}
+			var arr []*structpb.Struct
+			if err := json.Unmarshal(b, &arr); err != nil {
+				return err
+			}
+			toField.Set(reflect.ValueOf(arr))
+			continue
+		}
+
+		// 5. 递归：结构体 / 指针结构体
+		switch fromField.Kind() {
+		case reflect.Ptr:
+			if !fromField.IsNil() && toField.Kind() == reflect.Ptr && !toField.IsNil() {
+				if err := walkAndConvert(toField, fromField); err != nil {
+					return err
+				}
+			}
+		case reflect.Struct:
+			if toField.Kind() == reflect.Struct {
+				// 创建可寻址副本再处理（避免不可寻址导致的问题）
+				fFrom := fromField.Addr()
+				fTo := toField.Addr()
+				if err := walkAndConvert(fTo, fFrom); err != nil {
+					return err
+				}
+			}
+		case reflect.Slice:
+			// 递归切片元素
+			if toField.Kind() == reflect.Slice && fromField.Len() == toField.Len() {
+				for idx := 0; idx < fromField.Len(); idx++ {
+					fElem := fromField.Index(idx)
+					tElem := toField.Index(idx)
+					if fElem.Kind() == reflect.Ptr && tElem.Kind() == reflect.Ptr {
+						_ = walkAndConvert(tElem, fElem)
+					} else if fElem.Kind() == reflect.Struct && tElem.Kind() == reflect.Struct {
+						_ = walkAndConvert(tElem.Addr(), fElem.Addr())
+					}
+				}
+			}
 		}
 	}
-
 	return nil
 }
