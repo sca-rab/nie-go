@@ -105,6 +105,11 @@ func (c *Cache) AsyncDelRedis(key string, logHelper *log.Helper) {
 	}()
 }
 
+// TTLRefresh 刷新缓存过期时间
+func (c *Cache) TTLRefresh(ctx context.Context, key string, expiration time.Duration) error {
+	return c.redis.Expire(ctx, key, expiration).Err()
+}
+
 // 判断是否为基本数据类型（避免对基本类型进行JSON序列化）
 func isBasicType(v interface{}) bool {
 	kind := reflect.TypeOf(v).Kind()
