@@ -281,7 +281,63 @@ var (
 
 // convertStructPBFields 递归处理任意层级中的 *structpb.Struct / []*structpb.Struct
 func convertStructPBFields(to interface{}, from interface{}) error {
-	return walkAndConvert(reflect.ValueOf(to), reflect.ValueOf(from))
+	tv := reflect.ValueOf(to)
+	fv := reflect.ValueOf(from)
+	// 顶层：source=*structpb.Struct，target=struct
+	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
+		!tv.IsNil() && !fv.IsNil() &&
+		fv.Type() == typeStructPB &&
+		tv.Elem().Kind() == reflect.Struct {
+
+		ps := fv.Interface().(*structpb.Struct)
+		b, err := ps.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		// 直接 JSON 反序列化到强类型结构体
+		if err = json.Unmarshal(b, to); err != nil {
+			return err
+		}
+		return nil
+	}
+	// 顶层：[]*structpb.Struct → []*T
+	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
+		!tv.IsNil() && !fv.IsNil() &&
+		fv.Elem().Kind() == reflect.Slice &&
+		fv.Elem().Type() == typeSliceStructPB &&
+		tv.Elem().Kind() == reflect.Slice {
+
+		arr := fv.Elem()
+		outSlice := reflect.MakeSlice(tv.Elem().Type(), 0, arr.Len())
+		elemType := tv.Elem().Type().Elem()
+		ptrElem := elemType.Kind() == reflect.Ptr
+		baseType := elemType
+		if ptrElem {
+			baseType = elemType.Elem()
+		}
+		for i := 0; i < arr.Len(); i++ {
+			ps, _ := arr.Index(i).Interface().(*structpb.Struct)
+			if ps == nil {
+				continue
+			}
+			b, err := ps.MarshalJSON()
+			if err != nil {
+				return err
+			}
+			newElem := reflect.New(baseType).Interface()
+			if err = json.Unmarshal(b, newElem); err != nil {
+				return err
+			}
+			if ptrElem {
+				outSlice = reflect.Append(outSlice, reflect.ValueOf(newElem))
+			} else {
+				outSlice = reflect.Append(outSlice, reflect.ValueOf(newElem).Elem())
+			}
+		}
+		tv.Elem().Set(outSlice)
+		return nil
+	}
+	return walkAndConvert(tv, fv)
 }
 func walkAndConvert(toVal reflect.Value, fromVal reflect.Value) error {
 	if fromVal.Kind() != reflect.Ptr || toVal.Kind() != reflect.Ptr {
