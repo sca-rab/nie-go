@@ -283,30 +283,44 @@ var (
 func convertStructPBFields(to interface{}, from interface{}) error {
 	tv := reflect.ValueOf(to)
 	fv := reflect.ValueOf(from)
-	// 顶层：source=*structpb.Struct，target=struct
+
+	// 顶层：source=*structpb.Struct → target=struct
 	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
 		!tv.IsNil() && !fv.IsNil() &&
 		fv.Type() == typeStructPB &&
 		tv.Elem().Kind() == reflect.Struct {
-
 		ps := fv.Interface().(*structpb.Struct)
 		b, err := ps.MarshalJSON()
 		if err != nil {
 			return err
 		}
-		// 直接 JSON 反序列化到强类型结构体
 		if err = json.Unmarshal(b, to); err != nil {
 			return err
 		}
 		return nil
 	}
-	// 顶层：[]*structpb.Struct → []*T
+
+	// 顶层 source=*T(struct) → target=*structpb.Struct
+	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
+		!tv.IsNil() && !fv.IsNil() &&
+		tv.Type() == typeStructPB &&
+		fv.Elem().Kind() == reflect.Struct {
+		b, err := json.Marshal(fv.Interface())
+		if err != nil {
+			return err
+		}
+		if err := tv.Interface().(*structpb.Struct).UnmarshalJSON(b); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// 顶层：[]*structpb.Struct → []*T / []T
 	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
 		!tv.IsNil() && !fv.IsNil() &&
 		fv.Elem().Kind() == reflect.Slice &&
 		fv.Elem().Type() == typeSliceStructPB &&
 		tv.Elem().Kind() == reflect.Slice {
-
 		arr := fv.Elem()
 		outSlice := reflect.MakeSlice(tv.Elem().Type(), 0, arr.Len())
 		elemType := tv.Elem().Type().Elem()
@@ -337,6 +351,47 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 		tv.Elem().Set(outSlice)
 		return nil
 	}
+
+	// 顶层 []*T / []T → []*structpb.Struct
+	if tv.Kind() == reflect.Ptr && fv.Kind() == reflect.Ptr &&
+		!tv.IsNil() && !fv.IsNil() &&
+		tv.Elem().Kind() == reflect.Slice &&
+		tv.Elem().Type() == typeSliceStructPB &&
+		fv.Elem().Kind() == reflect.Slice &&
+		fv.Elem().Type() != typeSliceStructPB {
+		srcSlice := fv.Elem()
+		outSlice := reflect.MakeSlice(tv.Elem().Type(), 0, srcSlice.Len())
+		for i := 0; i < srcSlice.Len(); i++ {
+			elem := srcSlice.Index(i)
+			var src interface{}
+			switch elem.Kind() {
+			case reflect.Ptr:
+				if elem.IsNil() {
+					continue
+				}
+				if elem.Elem().Kind() != reflect.Struct {
+					continue
+				}
+				src = elem.Interface()
+			case reflect.Struct:
+				src = elem.Interface()
+			default:
+				continue
+			}
+			b, err := json.Marshal(src)
+			if err != nil {
+				return err
+			}
+			ps := &structpb.Struct{}
+			if err := ps.UnmarshalJSON(b); err != nil {
+				return err
+			}
+			outSlice = reflect.Append(outSlice, reflect.ValueOf(ps))
+		}
+		tv.Elem().Set(outSlice)
+		return nil
+	}
+
 	return walkAndConvert(tv, fv)
 }
 func walkAndConvert(toVal reflect.Value, fromVal reflect.Value) error {
