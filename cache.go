@@ -88,9 +88,32 @@ func (c *Cache) GetRedis(ctx context.Context, key string, result ...interface{})
 	return string(data), nil
 }
 
-// DelRedis 删除缓存
+// DelRedis 删除单个缓存 key
 func (c *Cache) DelRedis(ctx context.Context, key string) error {
 	return c.redis.Del(ctx, key).Err()
+}
+
+// DelRedisMulti 删除多个缓存 key（可变参数版）
+// 便于批量删除，用于 SCAN 前缀删除等场景
+func (c *Cache) DelRedisMulti(ctx context.Context, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	return c.redis.Del(ctx, keys...).Err()
+}
+
+// ScanRedis 使用 Redis SCAN 按模式分页扫描 key
+// 返回本次扫描到的 keys、下一次游标值和错误
+func (c *Cache) ScanRedis(ctx context.Context, cursor uint64, pattern string, count int64) ([]string, uint64, error) {
+	if count <= 0 {
+		count = 100
+	}
+	res := c.redis.Scan(ctx, cursor, pattern, count)
+	keys, nextCursor, err := res.Result()
+	if err != nil {
+		return nil, 0, err
+	}
+	return keys, nextCursor, nil
 }
 
 // AsyncDelRedis 异步删除缓存
