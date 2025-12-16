@@ -1,36 +1,55 @@
 package nie
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jinzhu/copier"
 	"github.com/mitchellh/mapstructure"
+	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/types/known/structpb"
 	"gorm.io/datatypes"
 )
+
+const (
+	layoutDateTime  = "2006-01-02 15:04:05"
+	layoutDateOnly  = "2006-01-02"
+	layoutYearMonth = "2006-01"
+)
+
+var nullTimeParseLayouts = []string{
+	time.DateTime,
+	time.DateOnly,
+	layoutYearMonth, // 兼容仅到月份的场景，如 "2025-10"
+}
+
+var (
+	errInvalidJSON        = errors.New("invalid json")
+	errExpectedJSONArray  = errors.New("expected json array")
+	errExpectedJSONObject = errors.New("expected json object")
+	errExpectedJSONString = errors.New("expected json string")
+)
+
+var copier4BffOption = copier.Option{
+	IgnoreEmpty: true,
+	DeepCopy:    true,
+}
 
 // Copier4Bff 使用 copier 深拷贝
 //
 // 用于将 *structpb.Struct 和 []*structpb.Struct 字段转换为自定义结构体
 func Copier4Bff(to interface{}, from interface{}) error {
-	err := copier.CopyWithOption(to, from, copier.Option{
-		IgnoreEmpty: true,
-		DeepCopy:    true,
-	})
-	if err != nil {
+	if err := copier.CopyWithOption(to, from, copier4BffOption); err != nil {
 		return err
 	}
 	// 然后，使用反射处理 *structpb.Struct 和 []*structpb.Struct 字段
-	err = convertStructPBFields(to, from)
-	if err != nil {
-		return err
-	}
-	return nil
+	return maybeConvertStructPBFields(to, from)
 }
 
 // Copier4Ent 使用 copier 深拷贝，加载自定义转换器
@@ -38,14 +57,7 @@ func Copier4Bff(to interface{}, from interface{}) error {
 // 用于entity结构体和pb结构体之间的转换
 func Copier4Ent(to interface{}, from interface{}) error {
 	// 首先，使用 copier 进行基本字段的复制
-	err := copier.CopyWithOption(to, from, copier.Option{
-		IgnoreEmpty: true,
-		DeepCopy:    true,
-		Converters:  CopierConverters,
-	})
-	if err != nil {
-		return err
-	}
+	return copier.CopyWithOption(to, from, copier4EntOption)
 	//FieldNameMapping: []copier.FieldNameMapping{
 	//		{
 	//			SrcType: time.Time{},
@@ -57,11 +69,16 @@ func Copier4Ent(to interface{}, from interface{}) error {
 	//			},
 	//		},
 	//	}
-	return nil
 }
 
 // CopierConverters 定义 copier.Option 中 Converters 转换器列表
 var CopierConverters = getAllConverters()
+
+var copier4EntOption = copier.Option{
+	IgnoreEmpty: true,
+	DeepCopy:    true,
+	Converters:  CopierConverters,
+}
 
 // getAllConverters 定义 copier.Option 中 Converters 转换器列表
 func getAllConverters() []copier.TypeConverter {
@@ -73,7 +90,8 @@ func getAllConverters() []copier.TypeConverter {
 		GetTimeConverters,
 	}
 
-	var allConverters []copier.TypeConverter
+	// 目前固定为 2 + 2 + 2 + 2 + 3 = 11 个转换器
+	allConverters := make([]copier.TypeConverter, 0, 11)
 	for _, fn := range converterFuncList {
 		allConverters = append(allConverters, fn()...)
 	}
@@ -94,9 +112,9 @@ func GetNullTimeConverters() []copier.TypeConverter {
 				}
 				/// 整天输出 YYYY-MM-DD，否则输出 YYYY-MM-DD HH:MM:SS
 				if nt.Time.Hour() == 0 && nt.Time.Minute() == 0 && nt.Time.Second() == 0 {
-					return nt.Time.Format("2006-01-02"), nil
+					return nt.Time.Format(layoutDateOnly), nil
 				}
-				return nt.Time.Format("2006-01-02 15:04:05"), nil
+				return nt.Time.Format(layoutDateTime), nil
 			},
 		},
 		// string -> sql.NullTime
@@ -108,15 +126,10 @@ func GetNullTimeConverters() []copier.TypeConverter {
 				if s == "" {
 					return sql.NullTime{Valid: false}, nil
 				}
-				layouts := []string{
-					time.DateTime,
-					time.DateOnly,
-					"2006-01", // 兼容仅到月份的场景，如 "2025-10"
-				}
-				for _, layout := range layouts {
+				for _, layout := range nullTimeParseLayouts {
 					if t, err := time.Parse(layout, s); err == nil {
 						// 若为按月字符串，则归一为该月最后一天 00:00:00
-						if layout == "2006-01" {
+						if layout == layoutYearMonth {
 							loc := t.Location()
 							lastDay := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, loc)
 							return sql.NullTime{Time: lastDay, Valid: true}, nil
@@ -138,12 +151,32 @@ func GetJSONConverters() []copier.TypeConverter {
 			SrcType: datatypes.JSON{},
 			DstType: []string{},
 			Fn: func(src interface{}) (interface{}, error) {
-				var result []string
-				err := json.Unmarshal(src.(datatypes.JSON), &result)
-				if err != nil {
-					return nil, err
+				jsonBytes := []byte(src.(datatypes.JSON))
+				if len(jsonBytes) == 0 {
+					return []string(nil), nil
 				}
-				return result, nil
+				if !gjson.ValidBytes(jsonBytes) {
+					return nil, errInvalidJSON
+				}
+				res := gjson.ParseBytes(jsonBytes)
+				if !res.IsArray() {
+					return nil, errExpectedJSONArray
+				}
+				arr := res.Array()
+				out := make([]string, 0, len(arr))
+				var typeErr error
+				for _, v := range arr {
+					if v.Type == gjson.String {
+						out = append(out, v.String())
+						continue
+					}
+					typeErr = errExpectedJSONString
+					break
+				}
+				if typeErr != nil {
+					return nil, typeErr
+				}
+				return out, nil
 			},
 		},
 		// []string -> datatypes.JSON
@@ -151,11 +184,26 @@ func GetJSONConverters() []copier.TypeConverter {
 			SrcType: []string{},
 			DstType: datatypes.JSON{},
 			Fn: func(src interface{}) (interface{}, error) {
-				jsonData, err := json.Marshal(src.([]string))
-				if err != nil {
-					return nil, err
+				arr := src.([]string)
+				// 保持与 json.Marshal([]string(nil)) 一致：nil slice -> "null"
+				if arr == nil {
+					return datatypes.JSON([]byte("null")), nil
 				}
-				return datatypes.JSON(jsonData), nil
+				var buf bytes.Buffer
+				buf.Grow(2 + len(arr)*2)
+				buf.WriteByte('[')
+				for i, s := range arr {
+					if i > 0 {
+						buf.WriteByte(',')
+					}
+					b, err := json.Marshal(s)
+					if err != nil {
+						return nil, err
+					}
+					buf.Write(b)
+				}
+				buf.WriteByte(']')
+				return datatypes.JSON(buf.Bytes()), nil
 			},
 		},
 	}
@@ -169,9 +217,34 @@ func GetStructPBSliceConverters() []copier.TypeConverter {
 			SrcType: datatypes.JSON{},
 			DstType: []*structpb.Struct{},
 			Fn: func(src interface{}) (interface{}, error) {
-				var result []*structpb.Struct
-				err := json.Unmarshal(src.(datatypes.JSON), &result)
-				return result, err
+				jsonBytes := []byte(src.(datatypes.JSON))
+				if len(jsonBytes) == 0 {
+					return []*structpb.Struct(nil), nil
+				}
+				if !gjson.ValidBytes(jsonBytes) {
+					return nil, errInvalidJSON
+				}
+				res := gjson.ParseBytes(jsonBytes)
+				if !res.IsArray() {
+					return nil, errExpectedJSONArray
+				}
+				arr := res.Array()
+				out := make([]*structpb.Struct, 0, len(arr))
+				for _, v := range arr {
+					if v.Type == gjson.Null {
+						out = append(out, nil)
+						continue
+					}
+					if v.Type != gjson.JSON {
+						return nil, errExpectedJSONObject
+					}
+					ps := &structpb.Struct{}
+					if err := ps.UnmarshalJSON([]byte(v.Raw)); err != nil {
+						return nil, err
+					}
+					out = append(out, ps)
+				}
+				return out, nil
 			},
 		},
 		// []*structpb.Struct -> datatypes.JSON
@@ -179,8 +252,26 @@ func GetStructPBSliceConverters() []copier.TypeConverter {
 			SrcType: []*structpb.Struct{},
 			DstType: datatypes.JSON{},
 			Fn: func(src interface{}) (interface{}, error) {
-				jsonData, err := json.Marshal(src)
-				return datatypes.JSON(jsonData), err
+				arr := src.([]*structpb.Struct)
+				var buf bytes.Buffer
+				buf.Grow(2 + len(arr)*2)
+				buf.WriteByte('[')
+				for i, ps := range arr {
+					if i > 0 {
+						buf.WriteByte(',')
+					}
+					if ps == nil {
+						buf.WriteString("null")
+						continue
+					}
+					b, err := ps.MarshalJSON()
+					if err != nil {
+						return nil, err
+					}
+					buf.Write(b)
+				}
+				buf.WriteByte(']')
+				return datatypes.JSON(buf.Bytes()), nil
 			},
 		},
 	}
@@ -250,7 +341,7 @@ func GetTimeConverters() []copier.TypeConverter {
 					return "", nil
 				}
 				// 格式化时间为字符串
-				return timeVal.Format("2006-01-02 15:04:05"), nil
+				return timeVal.Format(layoutDateTime), nil
 			},
 		},
 		// string -> time.Time
@@ -264,7 +355,7 @@ func GetTimeConverters() []copier.TypeConverter {
 					return time.Time{}, nil
 				}
 				// 解析字符串为时间类型
-				parsedTime, err := time.Parse("2006-01-02 15:04:05", dateStr)
+				parsedTime, err := time.Parse(layoutDateTime, dateStr)
 				if err != nil {
 					return nil, err
 				}
@@ -279,6 +370,145 @@ var (
 	typeSliceStructPB = reflect.TypeOf([]*structpb.Struct{})
 )
 
+var structPBTypeScanCache sync.Map // map[reflect.Type]bool
+
+type fieldIndexPathCacheKey struct {
+	from reflect.Type
+	to   reflect.Type
+}
+
+var fieldIndexPathCache sync.Map // map[fieldIndexPathCacheKey][][]int
+
+func maybeConvertStructPBFields(to interface{}, from interface{}) error {
+	if !shouldConvertStructPBFields(to, from) {
+		return nil
+	}
+	return convertStructPBFields(to, from)
+}
+
+func shouldConvertStructPBFields(to interface{}, from interface{}) bool {
+	toType := reflect.TypeOf(to)
+	fromType := reflect.TypeOf(from)
+	if toType == nil || fromType == nil {
+		return false
+	}
+
+	// 顶层：source=*structpb.Struct → target=*T(struct)
+	if fromType == typeStructPB && toType.Kind() == reflect.Ptr && toType.Elem().Kind() == reflect.Struct {
+		return true
+	}
+
+	// 顶层：source=*T(struct) → target=*structpb.Struct
+	if toType == typeStructPB && fromType.Kind() == reflect.Ptr && fromType.Elem().Kind() == reflect.Struct {
+		return true
+	}
+
+	// 顶层：source=*[]*structpb.Struct → target=*[]T / *[]*T
+	if fromType.Kind() == reflect.Ptr && toType.Kind() == reflect.Ptr &&
+		fromType.Elem().Kind() == reflect.Slice && fromType.Elem() == typeSliceStructPB &&
+		toType.Elem().Kind() == reflect.Slice {
+		return true
+	}
+
+	// 顶层：source=*[]T / *[]*T → target=*[]*structpb.Struct
+	if toType.Kind() == reflect.Ptr && fromType.Kind() == reflect.Ptr &&
+		toType.Elem().Kind() == reflect.Slice && toType.Elem() == typeSliceStructPB &&
+		fromType.Elem().Kind() == reflect.Slice && fromType.Elem() != typeSliceStructPB {
+		return true
+	}
+
+	// 普通结构体：仅当任一侧类型树包含 structpb.Struct 相关字段时才需要进入反射递归
+	if toType.Kind() != reflect.Ptr || fromType.Kind() != reflect.Ptr {
+		return false
+	}
+	if toType.Elem().Kind() != reflect.Struct || fromType.Elem().Kind() != reflect.Struct {
+		return false
+	}
+
+	return typeTreeContainsStructPB(toType.Elem()) || typeTreeContainsStructPB(fromType.Elem())
+}
+
+func typeTreeContainsStructPB(t reflect.Type) bool {
+	if t == nil {
+		return false
+	}
+	if v, ok := structPBTypeScanCache.Load(t); ok {
+		return v.(bool)
+	}
+	visited := make(map[reflect.Type]struct{}, 16)
+	result := typeTreeContainsStructPBNoCache(t, visited)
+	structPBTypeScanCache.Store(t, result)
+	return result
+}
+
+func typeTreeContainsStructPBNoCache(t reflect.Type, visited map[reflect.Type]struct{}) bool {
+	if t == nil {
+		return false
+	}
+	if t == typeStructPB || t == typeSliceStructPB {
+		return true
+	}
+	if _, ok := visited[t]; ok {
+		return false
+	}
+	visited[t] = struct{}{}
+
+	switch t.Kind() {
+	case reflect.Ptr:
+		return typeTreeContainsStructPBNoCache(t.Elem(), visited)
+	case reflect.Struct:
+		for i := 0; i < t.NumField(); i++ {
+			ft := t.Field(i).Type
+			if typeTreeContainsStructPBNoCache(ft, visited) {
+				return true
+			}
+		}
+		return false
+	case reflect.Slice, reflect.Array:
+		return typeTreeContainsStructPBNoCache(t.Elem(), visited)
+	default:
+		return false
+	}
+}
+
+func getFieldIndexPaths(fromType, toType reflect.Type) [][]int {
+	if fromType == nil || toType == nil || fromType.Kind() != reflect.Struct || toType.Kind() != reflect.Struct {
+		return nil
+	}
+	key := fieldIndexPathCacheKey{from: fromType, to: toType}
+	if v, ok := fieldIndexPathCache.Load(key); ok {
+		return v.([][]int)
+	}
+
+	paths := make([][]int, fromType.NumField())
+	for i := 0; i < fromType.NumField(); i++ {
+		sf := fromType.Field(i)
+		if tf, ok := toType.FieldByName(sf.Name); ok {
+			idx := make([]int, len(tf.Index))
+			copy(idx, tf.Index)
+			paths[i] = idx
+		}
+	}
+
+	fieldIndexPathCache.Store(key, paths)
+	return paths
+}
+
+func decodeStructPBInto(dst interface{}, src *structpb.Struct) error {
+	if src == nil {
+		return nil
+	}
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		TagName:          "json",
+		WeaklyTypedInput: true,
+		Result:           dst,
+	})
+	if err != nil {
+		return err
+	}
+	return dec.Decode(src.AsMap())
+}
+
 // convertStructPBFields 递归处理任意层级中的 *structpb.Struct / []*structpb.Struct
 func convertStructPBFields(to interface{}, from interface{}) error {
 	tv := reflect.ValueOf(to)
@@ -290,14 +520,7 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 		fv.Type() == typeStructPB &&
 		tv.Elem().Kind() == reflect.Struct {
 		ps := fv.Interface().(*structpb.Struct)
-		b, err := ps.MarshalJSON()
-		if err != nil {
-			return err
-		}
-		if err = json.Unmarshal(b, to); err != nil {
-			return err
-		}
-		return nil
+		return decodeStructPBInto(to, ps)
 	}
 
 	// 顶层 source=*T(struct) → target=*structpb.Struct
@@ -334,12 +557,8 @@ func convertStructPBFields(to interface{}, from interface{}) error {
 			if ps == nil {
 				continue
 			}
-			b, err := ps.MarshalJSON()
-			if err != nil {
-				return err
-			}
 			newElem := reflect.New(baseType).Interface()
-			if err = json.Unmarshal(b, newElem); err != nil {
+			if err := decodeStructPBInto(newElem, ps); err != nil {
 				return err
 			}
 			if ptrElem {
@@ -409,10 +628,21 @@ func walkAndConvert(toVal reflect.Value, fromVal reflect.Value) error {
 	}
 
 	fromType := fromVal.Type()
+	toType := toVal.Type()
+	indexPaths := getFieldIndexPaths(fromType, toType)
 	for i := 0; i < fromVal.NumField(); i++ {
 		fromField := fromVal.Field(i)
-		fieldInfo := fromType.Field(i)
-		toField := toVal.FieldByName(fieldInfo.Name)
+		var toField reflect.Value
+		if indexPaths != nil {
+			idx := indexPaths[i]
+			if idx == nil {
+				continue
+			}
+			toField = toVal.FieldByIndex(idx)
+		} else {
+			fieldInfo := fromType.Field(i)
+			toField = toVal.FieldByName(fieldInfo.Name)
+		}
 		if !toField.IsValid() || !toField.CanSet() {
 			continue
 		}
