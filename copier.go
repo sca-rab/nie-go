@@ -36,6 +36,30 @@ var (
 	errExpectedJSONString = errors.New("expected json string")
 )
 
+func isEmptyJSONObjectBytes(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	i := 0
+	j := len(b) - 1
+	for i <= j {
+		c := b[i]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			break
+		}
+		i++
+	}
+	for j >= i {
+		c := b[j]
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			break
+		}
+		j--
+	}
+	// trimmed must be exactly "{}"
+	return j-i == 1 && b[i] == '{' && b[j] == '}'
+}
+
 var copier4BffOption = copier.Option{
 	IgnoreEmpty: true,
 	DeepCopy:    true,
@@ -158,7 +182,15 @@ func GetJSONConverters() []copier.TypeConverter {
 				if !gjson.ValidBytes(jsonBytes) {
 					return nil, errInvalidJSON
 				}
+				if isEmptyJSONObjectBytes(jsonBytes) {
+					// 兼容脏数据：字段被写成 "{}" 时按空/未设置处理
+					return []string(nil), nil
+				}
 				res := gjson.ParseBytes(jsonBytes)
+				if res.Type == gjson.Null {
+					// 保持与 json.Unmarshal("null", &[]string{}) 一致：返回 nil slice
+					return []string(nil), nil
+				}
 				if !res.IsArray() {
 					return nil, errExpectedJSONArray
 				}
@@ -224,7 +256,15 @@ func GetStructPBSliceConverters() []copier.TypeConverter {
 				if !gjson.ValidBytes(jsonBytes) {
 					return nil, errInvalidJSON
 				}
+				if isEmptyJSONObjectBytes(jsonBytes) {
+					// 兼容脏数据：字段被写成 "{}" 时按空/未设置处理
+					return []*structpb.Struct(nil), nil
+				}
 				res := gjson.ParseBytes(jsonBytes)
+				if res.Type == gjson.Null {
+					// 保持与 json.Unmarshal("null", &[]*structpb.Struct{}) 一致：返回 nil slice
+					return []*structpb.Struct(nil), nil
+				}
 				if !res.IsArray() {
 					return nil, errExpectedJSONArray
 				}
