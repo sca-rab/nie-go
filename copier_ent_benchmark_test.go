@@ -153,6 +153,50 @@ func TestConverter_LabelsSliceToJSON_CompatWithEncodingJSON(t *testing.T) {
 	}
 }
 
+func TestConverter_JSONNullToLabelsSlice_ReturnsNil(t *testing.T) {
+	from := &entFromLabelsJSON{Labels: datatypes.JSON([]byte("null"))}
+	to := &entToLabelsSlice{}
+	if err := Copier4Ent(to, from); err != nil {
+		t.Fatalf("Copier4Ent error: %v", err)
+	}
+	if to.Labels != nil {
+		t.Fatalf("expected Labels to be nil, got len=%d", len(to.Labels))
+	}
+}
+
+func TestConverter_EmptyObjectToLabelsSlice_ReturnsNil(t *testing.T) {
+	from := &entFromLabelsJSON{Labels: datatypes.JSON([]byte("{}"))}
+	to := &entToLabelsSlice{}
+	if err := Copier4Ent(to, from); err != nil {
+		t.Fatalf("Copier4Ent error: %v", err)
+	}
+	if to.Labels != nil {
+		t.Fatalf("expected Labels to be nil, got len=%d", len(to.Labels))
+	}
+}
+
+func TestConverter_JSONNullToStructPBSlice_ReturnsNil(t *testing.T) {
+	from := &entToMetasJSON{Metas: datatypes.JSON([]byte("null"))}
+	to := &entFromMetasPB{}
+	if err := Copier4Ent(to, from); err != nil {
+		t.Fatalf("Copier4Ent error: %v", err)
+	}
+	if to.Metas != nil {
+		t.Fatalf("expected Metas to be nil, got len=%d", len(to.Metas))
+	}
+}
+
+func TestConverter_EmptyObjectToStructPBSlice_ReturnsNil(t *testing.T) {
+	from := &entToMetasJSON{Metas: datatypes.JSON([]byte("{}"))}
+	to := &entFromMetasPB{}
+	if err := Copier4Ent(to, from); err != nil {
+		t.Fatalf("Copier4Ent error: %v", err)
+	}
+	if to.Metas != nil {
+		t.Fatalf("expected Metas to be nil, got len=%d", len(to.Metas))
+	}
+}
+
 func BenchmarkCopier4Ent_LabelsSliceToJSON(b *testing.B) {
 	from := &entFromLabelsSlice{Labels: []string{"a", "b", "c", "d", "e"}}
 	b.ResetTimer()
