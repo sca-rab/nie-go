@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -35,6 +37,93 @@ var (
 	errExpectedJSONObject = errors.New("expected json object")
 	errExpectedJSONString = errors.New("expected json string")
 )
+
+var defaultTimeLocationMu sync.RWMutex
+var defaultTimeLocation = func() *time.Location {
+	// 默认固定为上海时区：业务里大量日期字符串不带时区信息，按 UTC 解析会导致落库偏移 8 小时。
+	// 若运行环境缺少时区数据，则回退到 time.Local。
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.Local
+	}
+	return loc
+}()
+
+// StrictTimeParse 控制 string->time.Time/sql.NullTime 解析失败时的行为。
+//
+// - false（默认）：兼容历史行为，解析失败返回零值/Valid=false，不抛错。
+// - true：解析失败直接返回 error，便于上层快速定位“日期格式错误”。
+var StrictTimeParse bool
+
+func init() {
+	// 允许通过环境变量配置默认解析时区（用于“无时区信息”的日期字符串）。
+	// 例如：NIE_TIME_LOCATION=Asia/Shanghai
+	_ = SetDefaultTimeLocationName(os.Getenv("NIE_TIME_LOCATION"))
+	_ = SetDefaultTimeLocationName(os.Getenv("NIE_TIME_LOC"))
+}
+
+// SetDefaultTimeLocation 设置“无时区日期字符串”的默认解析时区。
+//
+// 说明：
+// - 仅影响类似 "2026-01-19" / "2026-01-19 08:00:00" 这类不带时区信息的字符串。
+// - 对 RFC3339（如 "2026-01-19T08:00:00+08:00"）不做强制覆盖，保持其绝对时间语义。
+func SetDefaultTimeLocation(loc *time.Location) {
+	if loc == nil {
+		return
+	}
+	defaultTimeLocationMu.Lock()
+	defaultTimeLocation = loc
+	defaultTimeLocationMu.Unlock()
+}
+
+// SetDefaultTimeLocationName 用 IANA 时区名设置默认解析时区，例如 "Asia/Shanghai"。
+func SetDefaultTimeLocationName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return err
+	}
+	SetDefaultTimeLocation(loc)
+	return nil
+}
+
+func getDefaultTimeLocation() *time.Location {
+	defaultTimeLocationMu.RLock()
+	loc := defaultTimeLocation
+	defaultTimeLocationMu.RUnlock()
+	if loc == nil {
+		return time.Local
+	}
+	return loc
+}
+
+// parseTimeString 解析日期/时间字符串。
+//
+// 规则：
+// 1) 若字符串包含 RFC3339 时区信息（"T" + "Z"/"+08:00" 等），则按 RFC3339 解析，保持绝对时间语义。
+// 2) 否则按给定 layout 使用 ParseInLocation，以默认时区解释“墙上时间”（避免默认 UTC 导致 +8 小时）。
+func parseTimeString(layout, value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+
+	// RFC3339 解析优先：带时区的字符串不要强行覆盖 location
+	if strings.Contains(value, "T") {
+		if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return t, nil
+		}
+		if t, err := time.Parse(time.RFC3339, value); err == nil {
+			return t, nil
+		}
+	}
+
+	loc := getDefaultTimeLocation()
+	return time.ParseInLocation(layout, value, loc)
+}
 
 func isEmptyJSONObjectBytes(b []byte) bool {
 	if len(b) == 0 {
@@ -151,15 +240,19 @@ func GetNullTimeConverters() []copier.TypeConverter {
 					return sql.NullTime{Valid: false}, nil
 				}
 				for _, layout := range nullTimeParseLayouts {
-					if t, err := time.Parse(layout, s); err == nil {
+					t, err := parseTimeString(layout, s)
+					if err == nil {
 						// 若为按月字符串，则归一为该月最后一天 00:00:00
 						if layout == layoutYearMonth {
-							loc := t.Location()
+							loc := getDefaultTimeLocation()
 							lastDay := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, loc)
 							return sql.NullTime{Time: lastDay, Valid: true}, nil
 						}
 						return sql.NullTime{Time: t, Valid: true}, nil
 					}
+				}
+				if StrictTimeParse {
+					return nil, fmt.Errorf("日期/时间格式不正确: %s", s)
 				}
 				return sql.NullTime{Valid: false}, nil
 			},
@@ -394,12 +487,15 @@ func GetTimeConverters() []copier.TypeConverter {
 				if dateStr == "" {
 					return time.Time{}, nil
 				}
-				// 解析字符串为时间类型
-				parsedTime, err := time.Parse(layoutDateTime, dateStr)
-				if err != nil {
-					return nil, err
+				// 解析字符串为时间类型：优先 RFC3339（带时区），否则按默认时区解释无时区字符串
+				if t, err := parseTimeString(layoutDateTime, dateStr); err == nil {
+					return t, nil
 				}
-				return parsedTime, nil
+				// 兼容仅日期字符串（YYYY-MM-DD -> 00:00:00）
+				if t, err := parseTimeString(layoutDateOnly, dateStr); err == nil {
+					return t, nil
+				}
+				return nil, fmt.Errorf("日期/时间格式不正确: %s", dateStr)
 			},
 		},
 	}
