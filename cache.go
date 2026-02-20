@@ -128,6 +128,20 @@ func (c *Cache) AsyncDelRedis(key string, logHelper *log.Helper) {
 	}()
 }
 
+// IncrRedis 对 key 执行原子自增并设置/刷新过期时间，返回自增后的值
+// 适用于频率限制、登录失败计数等场景
+func (c *Cache) IncrRedis(ctx context.Context, key string, expiration time.Duration) (int64, error) {
+	val, err := c.redis.Incr(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	// 每次自增后刷新过期时间，确保窗口期从最近一次操作开始计算
+	if expiration > 0 {
+		_ = c.redis.Expire(ctx, key, expiration)
+	}
+	return val, nil
+}
+
 // TTLRefresh 刷新缓存过期时间
 func (c *Cache) TTLRefresh(ctx context.Context, key string, expiration time.Duration) error {
 	return c.redis.Expire(ctx, key, expiration).Err()
